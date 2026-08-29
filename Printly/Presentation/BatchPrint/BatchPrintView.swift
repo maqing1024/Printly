@@ -3,12 +3,15 @@ import SwiftUI
 /// Main batch print screen matching the MVP wireframe.
 struct BatchPrintView: View {
     @StateObject private var viewModel: BatchPrintViewModel
+    @State private var presetName = ""
+    @State private var isHistoryPresented = false
 
     init(viewModel: BatchPrintViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
     }
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             Text(String(localized: "app.title"))
                 .font(.largeTitle.bold())
@@ -16,7 +19,7 @@ struct BatchPrintView: View {
 
             FolderDropZone(
                 isEnabled: viewModel.state.isDropEnabled,
-                onFolderDropped: { viewModel.handleFolderDrop($0) },
+                onURLsDropped: { viewModel.handleDroppedURLs($0) },
                 onClick: { viewModel.pickFolder() }
             )
 
@@ -27,9 +30,20 @@ struct BatchPrintView: View {
 
             if !viewModel.state.files.isEmpty || viewModel.state.phase == .ready {
                 summarySection
+                sortAndFilterSection
             }
 
             printerSection
+            presetSection
+            workflowSection
+
+            if !viewModel.state.files.isEmpty || viewModel.state.phase == .ready {
+                printOptionsSection
+            }
+
+            if !viewModel.state.jobs.isEmpty {
+                queueSection
+            }
 
             if viewModel.state.showsLibreOfficeInstall
                 || viewModel.state.libreOfficeInstallPhase.isInProgress
@@ -55,9 +69,16 @@ struct BatchPrintView: View {
             actionButtons
         }
         .padding(28)
-        .frame(minWidth: 420, idealWidth: 480, minHeight: 520)
+        }
+        .frame(minWidth: 560, idealWidth: 640, minHeight: 720)
         .onAppear { viewModel.refreshPrinter() }
         .toolbar { toolbarContent }
+        .sheet(isPresented: $isHistoryPresented) {
+            PrintHistorySheet(
+                records: viewModel.state.history,
+                onClear: { viewModel.clearHistory() }
+            )
+        }
     }
 
     @ToolbarContentBuilder
@@ -98,6 +119,15 @@ struct BatchPrintView: View {
                 .disabled(viewModel.state.phase == .printing)
                 .help(String(localized: "printer.pickerHelp"))
         }
+
+        ToolbarItem(placement: .automatic) {
+            Button {
+                isHistoryPresented = true
+            } label: {
+                Label(String(localized: "button.history"), systemImage: "clock")
+            }
+            .help(String(localized: "button.history"))
+        }
     }
 
     private var summarySection: some View {
@@ -128,6 +158,122 @@ struct BatchPrintView: View {
         .font(.body)
     }
 
+    private var sortAndFilterSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(String(localized: "sort.title"))
+                Picker(String(localized: "sort.title"), selection: sortBinding) {
+                    Text(String(localized: "sort.name")).tag(FileSortOrder.name)
+                    Text(String(localized: "sort.kind")).tag(FileSortOrder.kind)
+                    Text(String(localized: "sort.path")).tag(FileSortOrder.path)
+                }
+                .labelsHidden()
+                .frame(maxWidth: 160)
+                .disabled(viewModel.state.phase == .printing)
+            }
+
+            Text(String(localized: "filter.title"))
+                .font(.headline)
+            HStack(spacing: 12) {
+                filterToggle(.pdf, labelKey: "kind.pdf")
+                filterToggle(.word, labelKey: "kind.word")
+                filterToggle(.excel, labelKey: "kind.excel")
+                filterToggle(.image, labelKey: "kind.images")
+                filterToggle(.markdown, labelKey: "kind.markdown")
+            }
+            .disabled(viewModel.state.phase == .printing)
+        }
+    }
+
+    private func filterToggle(_ kind: FileKind, labelKey: String.LocalizationValue) -> some View {
+        Toggle(isOn: kindBinding(kind)) {
+            Text(String(localized: labelKey))
+        }
+        .toggleStyle(.checkbox)
+    }
+
+    private var presetSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "preset.title"))
+                .font(.headline)
+            HStack(spacing: 8) {
+                Picker(String(localized: "preset.title"), selection: presetBinding) {
+                    Text(String(localized: "preset.none")).tag(UUID?.none)
+                    ForEach(viewModel.state.presets) { preset in
+                        Text(preset.name).tag(Optional(preset.id))
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 180)
+                .disabled(viewModel.state.presets.isEmpty || viewModel.state.phase == .printing)
+
+                TextField(String(localized: "preset.namePlaceholder"), text: $presetName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
+                    .disabled(viewModel.state.phase == .printing)
+
+                Button(String(localized: "button.savePreset")) {
+                    viewModel.savePreset(named: presetName)
+                    presetName = ""
+                }
+                .disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || viewModel.state.phase == .printing)
+
+                Button(String(localized: "button.deletePreset")) {
+                    if let id = viewModel.state.selectedPresetID {
+                        viewModel.deletePreset(id: id)
+                    }
+                }
+                .disabled(viewModel.state.selectedPresetID == nil || viewModel.state.phase == .printing)
+            }
+        }
+    }
+
+    private var workflowSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: "workflow.title"))
+                .font(.headline)
+
+            HStack(spacing: 8) {
+                Toggle(isOn: archiveEnabledBinding) {
+                    Text(String(localized: "archive.enable"))
+                }
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.state.phase == .printing)
+
+                Text(viewModel.state.archiveFolderName ?? String(localized: "archive.none"))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button(String(localized: "button.chooseArchiveFolder")) {
+                    viewModel.pickArchiveFolder()
+                }
+                .disabled(viewModel.state.phase == .printing)
+            }
+
+            HStack(spacing: 8) {
+                Toggle(isOn: hotFolderEnabledBinding) {
+                    Text(String(localized: "hotFolder.enable"))
+                }
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.state.phase == .printing)
+
+                Text(viewModel.state.hotFolderName ?? String(localized: "hotFolder.none"))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button(String(localized: "button.chooseHotFolder")) {
+                    viewModel.pickHotFolder()
+                }
+                .disabled(viewModel.state.phase == .printing)
+
+                Toggle(isOn: hotFolderAutoPrintBinding) {
+                    Text(String(localized: "hotFolder.autoPrint"))
+                }
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.state.phase == .printing || !viewModel.state.hotFolderEnabled)
+            }
+        }
+    }
+
     private var printerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -155,6 +301,179 @@ struct BatchPrintView: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
+        }
+    }
+
+    private var printOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: "settings.title"))
+                .font(.headline)
+
+            HStack(spacing: 16) {
+                HStack(spacing: 8) {
+                    Text(String(localized: "settings.copies"))
+                    Stepper(
+                        value: copiesBinding,
+                        in: 1...99
+                    ) {
+                        Text("\(viewModel.state.printSettings.copies)")
+                            .monospacedDigit()
+                            .frame(minWidth: 24, alignment: .trailing)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Text(String(localized: "settings.duplex"))
+                    Picker(String(localized: "settings.duplex"), selection: duplexBinding) {
+                        Text(String(localized: "settings.duplex.simplex")).tag(DuplexMode.simplex)
+                        Text(String(localized: "settings.duplex.longEdge")).tag(DuplexMode.longEdge)
+                        Text(String(localized: "settings.duplex.shortEdge")).tag(DuplexMode.shortEdge)
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 160)
+                }
+
+                HStack(spacing: 8) {
+                    Text(String(localized: "settings.color"))
+                    Picker(String(localized: "settings.color"), selection: colorBinding) {
+                        Text(String(localized: "settings.color.color")).tag(ColorMode.color)
+                        Text(String(localized: "settings.color.blackAndWhite")).tag(ColorMode.blackAndWhite)
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 120)
+                }
+            }
+            .disabled(viewModel.state.phase == .printing)
+
+            HStack(spacing: 8) {
+                Text(String(localized: "settings.pageRange"))
+                TextField(
+                    String(localized: "settings.pageRange.placeholder"),
+                    text: pageRangeBinding
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 180)
+                .disabled(viewModel.state.phase == .printing)
+            }
+
+            Text(String(localized: "settings.pageRange.hint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !viewModel.state.isPageRangeValid {
+                Text(String(localized: "error.invalidPageRange"))
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var sortBinding: Binding<FileSortOrder> {
+        Binding(
+            get: { viewModel.state.sortOrder },
+            set: { viewModel.setSortOrder($0) }
+        )
+    }
+
+    private func kindBinding(_ kind: FileKind) -> Binding<Bool> {
+        Binding(
+            get: { viewModel.state.enabledKinds.contains(kind) },
+            set: { viewModel.setKind(kind, enabled: $0) }
+        )
+    }
+
+    private var presetBinding: Binding<UUID?> {
+        Binding(
+            get: { viewModel.state.selectedPresetID },
+            set: { newValue in
+                if let newValue {
+                    viewModel.applyPreset(id: newValue)
+                }
+            }
+        )
+    }
+
+    private var archiveEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.state.archiveEnabled },
+            set: { viewModel.setArchiveEnabled($0) }
+        )
+    }
+
+    private var hotFolderEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.state.hotFolderEnabled },
+            set: { viewModel.setHotFolderEnabled($0) }
+        )
+    }
+
+    private var hotFolderAutoPrintBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.state.hotFolderAutoPrint },
+            set: { viewModel.setHotFolderAutoPrint($0) }
+        )
+    }
+
+    private var copiesBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.state.printSettings.copies },
+            set: { viewModel.setCopies($0) }
+        )
+    }
+
+    private var duplexBinding: Binding<DuplexMode> {
+        Binding(
+            get: { viewModel.state.printSettings.duplex },
+            set: { viewModel.setDuplex($0) }
+        )
+    }
+
+    private var colorBinding: Binding<ColorMode> {
+        Binding(
+            get: { viewModel.state.printSettings.colorMode },
+            set: { viewModel.setColorMode($0) }
+        )
+    }
+
+    private var pageRangeBinding: Binding<String> {
+        Binding(
+            get: { viewModel.state.printSettings.pageRangeText },
+            set: { viewModel.setPageRangeText($0) }
+        )
+    }
+
+    private var queueSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "queue.title"))
+                .font(.headline)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(viewModel.state.jobs) { job in
+                        HStack(spacing: 8) {
+                            Image(systemName: jobStatusIcon(job.status))
+                                .foregroundStyle(jobStatusColor(job.status))
+                                .frame(width: 16)
+                            Text(job.file.displayName)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(kindLabel(job.file.kind))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(phaseLabel(job.status))
+                                .font(.caption)
+                                .foregroundStyle(jobStatusColor(job.status))
+                            if case .failed = job.status, viewModel.state.phase != .printing {
+                                Button(String(localized: "button.retry")) {
+                                    viewModel.retryJob(id: job.id)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 180)
         }
     }
 
@@ -342,6 +661,47 @@ struct BatchPrintView: View {
                 }
             }
             Spacer()
+        }
+    }
+
+    private func kindLabel(_ kind: FileKind) -> String {
+        switch kind {
+        case .pdf:
+            String(localized: "kind.pdf")
+        case .word:
+            String(localized: "kind.word")
+        case .excel:
+            String(localized: "kind.excel")
+        case .image:
+            String(localized: "kind.images")
+        case .markdown:
+            String(localized: "kind.markdown")
+        }
+    }
+
+    private func jobStatusIcon(_ status: PrintJobStatus) -> String {
+        switch status {
+        case .pending:
+            "circle"
+        case .converting, .printing:
+            "arrow.triangle.2.circlepath"
+        case .succeeded:
+            "checkmark.circle.fill"
+        case .failed:
+            "xmark.circle.fill"
+        }
+    }
+
+    private func jobStatusColor(_ status: PrintJobStatus) -> Color {
+        switch status {
+        case .pending:
+            .secondary
+        case .converting, .printing:
+            .accentColor
+        case .succeeded:
+            .green
+        case .failed:
+            .red
         }
     }
 

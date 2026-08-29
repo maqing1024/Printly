@@ -18,5 +18,6 @@ nonisolated protocol PrintServing: Sendable {
     /// - Parameters:
     ///   - pdfURL: Local PDF file URL.
     ///   - printer: Target printer.
-    func printPDF(at pdfURL: URL, using printer: PrinterInfo) async throws
+    ///   - settings: Copies, duplex, color, and page range.
+    func printPDF(at pdfURL: URL, using printer: PrinterInfo, settings: PrintSettings) async throws
 }

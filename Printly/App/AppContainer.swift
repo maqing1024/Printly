@@ -34,7 +34,10 @@ final class AppContainer {
                 printService: printService
             ),
             printService: printService,
-            libreOfficeInstaller: LibreOfficeInstaller()
+            libreOfficeInstaller: LibreOfficeInstaller(),
+            settingsStore: JSONSettingsStore(),
+            archiver: FileArchiveService(),
+            folderWatcher: DirectoryWatcher()
         )
     }
 }

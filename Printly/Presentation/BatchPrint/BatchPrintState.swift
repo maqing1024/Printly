@@ -34,6 +34,8 @@ struct BatchPrintState: Equatable, Sendable {
     var phase: BatchPrintPhase = .idle
     var folderName: String?
     var files: [PrintableFile] = []
+    var jobs: [PrintJob] = []
+    var printSettings: PrintSettings = .default
     var printerName: String?
     var availablePrinters: [PrinterInfo] = []
     var progress: BatchPrintProgress?
@@ -44,13 +46,25 @@ struct BatchPrintState: Equatable, Sendable {
     var isMicrosoftOfficeInstalled: Bool = MicrosoftOfficeConverter.isInstalled
     var libreOfficeInstallPhase: LibreOfficeInstallUIPhase = .idle
 
-    var totalCount: Int { files.count }
+    var sortOrder: FileSortOrder = .name
+    var enabledKinds: Set<FileKind> = Set(FileKind.allCases)
+    var presets: [PrintPreset] = []
+    var selectedPresetID: UUID?
+    var history: [PrintHistoryRecord] = []
 
-    var pdfCount: Int { files.filter { $0.kind == .pdf }.count }
-    var wordCount: Int { files.filter { $0.kind == .word }.count }
-    var excelCount: Int { files.filter { $0.kind == .excel }.count }
-    var imageCount: Int { files.filter { $0.kind == .image }.count }
-    var markdownCount: Int { files.filter { $0.kind == .markdown }.count }
+    var archiveEnabled: Bool = false
+    var archiveFolderPath: String?
+    var hotFolderEnabled: Bool = false
+    var hotFolderPath: String?
+    var hotFolderAutoPrint: Bool = false
+
+    var totalCount: Int { jobs.count }
+
+    var pdfCount: Int { jobs.filter { $0.file.kind == .pdf }.count }
+    var wordCount: Int { jobs.filter { $0.file.kind == .word }.count }
+    var excelCount: Int { jobs.filter { $0.file.kind == .excel }.count }
+    var imageCount: Int { jobs.filter { $0.file.kind == .image }.count }
+    var markdownCount: Int { jobs.filter { $0.file.kind == .markdown }.count }
 
     var hasOfficeFiles: Bool {
         wordCount > 0 || excelCount > 0
@@ -61,10 +75,34 @@ struct BatchPrintState: Equatable, Sendable {
         hasOfficeFiles && !isLibreOfficeInstalled
     }
 
+    var isPageRangeValid: Bool {
+        if case .success = printSettings.resolvedPageRange {
+            true
+        } else {
+            false
+        }
+    }
+
+    var archiveFolderName: String? {
+        archiveFolderPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+    }
+
+    var hotFolderName: String? {
+        hotFolderPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+    }
+
     var canStartPrint: Bool {
         phase == .ready
-            && !files.isEmpty
+            && !jobs.isEmpty
             && printerName != nil
+            && isPageRangeValid
+            && !libreOfficeInstallPhase.isInProgress
+    }
+
+    var canAutoPrintHotFolder: Bool {
+        (phase == .ready || phase == .finished || phase == .idle)
+            && printerName != nil
+            && isPageRangeValid
             && !libreOfficeInstallPhase.isInProgress
     }
 

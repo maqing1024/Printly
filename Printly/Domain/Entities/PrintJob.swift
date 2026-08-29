@@ -39,6 +39,7 @@ nonisolated struct PrintJob: Identifiable, Sendable, Equatable {
 nonisolated struct BatchPrintProgress: Sendable, Equatable {
     let currentIndex: Int
     let totalCount: Int
+    let currentFileID: UUID?
     let currentFileName: String
     let phase: PrintJobStatus
     let succeededCount: Int

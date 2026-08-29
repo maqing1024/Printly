@@ -37,10 +37,15 @@ nonisolated struct RecursiveFolderScanner: FolderScanning {
     ) throws -> [PrintableFile] {
         let fileManager = FileManager.default
         var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: rootURL.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else {
+        guard fileManager.fileExists(atPath: rootURL.path, isDirectory: &isDirectory) else {
             throw ScanError.notADirectory
+        }
+
+        if !isDirectory.boolValue {
+            return try classifySingleFile(
+                rootURL,
+                classifier: classifier
+            )
         }
 
         guard let enumerator = fileManager.enumerator(
@@ -87,6 +92,27 @@ nonisolated struct RecursiveFolderScanner: FolderScanning {
         }
 
         return sorter.sorted(discovered)
+    }
+
+    private static func classifySingleFile(
+        _ fileURL: URL,
+        classifier: FileClassifier
+    ) throws -> [PrintableFile] {
+        let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
+        guard values.isRegularFile == true else {
+            throw ScanError.notADirectory
+        }
+        guard let kind = classifier.classify(fileURL) else {
+            return []
+        }
+        return [
+            PrintableFile(
+                url: fileURL,
+                kind: kind,
+                displayName: fileURL.lastPathComponent,
+                relativePath: fileURL.lastPathComponent
+            )
+        ]
     }
 }
 

@@ -11,29 +11,37 @@ final class BatchPrintViewModel: ObservableObject {
     private let printBatch: PrintBatchUseCase
     private let printService: any PrintServing
     private let libreOfficeInstaller: LibreOfficeInstaller
+    private let settingsStore: any SettingsStoring
+    private let archiver: any FileArchiving
+    private let folderWatcher: any FolderWatching
+    private let sorter = FileSorter()
 
     private var scanTask: Task<Void, Never>?
     private var printTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    private var hotFolderKnownPaths = Set<String>()
 
     /// Creates the batch print view model.
-    /// - Parameters:
-    ///   - scanFolder: Folder scan use case.
-    ///   - printBatch: Batch print use case.
-    ///   - printService: Printer discovery / printing backend.
-    ///   - libreOfficeInstaller: One-click LibreOffice installer.
     init(
         scanFolder: ScanFolderUseCase,
         printBatch: PrintBatchUseCase,
         printService: any PrintServing,
-        libreOfficeInstaller: LibreOfficeInstaller = LibreOfficeInstaller()
+        libreOfficeInstaller: LibreOfficeInstaller = LibreOfficeInstaller(),
+        settingsStore: any SettingsStoring = JSONSettingsStore(),
+        archiver: any FileArchiving = FileArchiveService(),
+        folderWatcher: any FolderWatching
     ) {
         self.scanFolder = scanFolder
         self.printBatch = printBatch
         self.printService = printService
         self.libreOfficeInstaller = libreOfficeInstaller
+        self.settingsStore = settingsStore
+        self.archiver = archiver
+        self.folderWatcher = folderWatcher
+        applySettings(settingsStore.load())
         refreshPrinter()
         refreshOfficeAvailability()
+        restoreHotFolderWatchIfNeeded()
     }
 
     /// Reloads available printers and keeps a valid selection.
@@ -48,10 +56,10 @@ final class BatchPrintViewModel: ObservableObject {
     }
 
     /// Selects the printer used for the next batch.
-    /// - Parameter name: Printer name from the available list.
     func selectPrinter(_ name: String) {
         guard state.availablePrinters.contains(where: { $0.name == name }) else { return }
         state.printerName = name
+        persistSettings()
     }
 
     /// Opens System Settings / Preferences so the user can add a nearby printer.
@@ -73,17 +81,23 @@ final class BatchPrintViewModel: ObservableObject {
     }
 
     /// Handles a dropped or selected folder URL.
-    /// - Parameter url: Folder root.
     func handleFolderDrop(_ url: URL) {
+        handleDroppedURLs([url])
+    }
+
+    /// Handles dropped or chosen files and folders.
+    func handleDroppedURLs(_ urls: [URL]) {
         guard state.isDropEnabled else { return }
         guard !state.libreOfficeInstallPhase.isInProgress else { return }
+        guard !urls.isEmpty else { return }
 
         scanTask?.cancel()
         printTask?.cancel()
 
         state.phase = .scanning
-        state.folderName = url.lastPathComponent
+        state.folderName = Self.displayName(for: urls)
         state.files = []
+        state.jobs = []
         state.progress = nil
         state.lastResult = nil
         state.errorMessage = nil
@@ -97,11 +111,10 @@ final class BatchPrintViewModel: ObservableObject {
         scanTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let files = try await scanFolder.execute(url)
+                let files = try await scanFolder.execute(urls)
                 try Task.checkCancellation()
-                state.files = files
-                state.phase = .ready
-                state.errorMessage = files.isEmpty
+                applyScannedFiles(files)
+                state.errorMessage = state.jobs.isEmpty
                     ? String(localized: "message.noSupportedFiles")
                     : nil
                 state.isDropEnabled = true
@@ -113,18 +126,112 @@ final class BatchPrintViewModel: ObservableObject {
             } catch {
                 state.phase = .idle
                 state.files = []
+                state.jobs = []
                 state.errorMessage = error.localizedDescription
                 state.isDropEnabled = true
             }
         }
     }
 
-    /// Starts printing all scanned files.
+    /// Updates the number of copies (1...99).
+    func setCopies(_ copies: Int) {
+        state.printSettings.copies = copies
+        state.printSettings.clampCopies()
+        persistSettings()
+    }
+
+    /// Updates two-sided printing.
+    func setDuplex(_ duplex: DuplexMode) {
+        state.printSettings.duplex = duplex
+        persistSettings()
+    }
+
+    /// Updates color versus black-and-white output.
+    func setColorMode(_ colorMode: ColorMode) {
+        state.printSettings.colorMode = colorMode
+        persistSettings()
+    }
+
+    /// Updates the page-range text (blank means all pages).
+    func setPageRangeText(_ text: String) {
+        state.printSettings.pageRangeText = text
+        if state.isPageRangeValid {
+            if state.errorMessage == String(localized: "error.invalidPageRange") {
+                state.errorMessage = nil
+            }
+        }
+        persistSettings()
+    }
+
+    /// Updates queue sort order.
+    func setSortOrder(_ order: FileSortOrder) {
+        state.sortOrder = order
+        rebuildQueue(resetStatuses: state.phase != .printing)
+        persistSettings()
+    }
+
+    /// Enables or disables a file kind in the queue.
+    func setKind(_ kind: FileKind, enabled: Bool) {
+        if enabled {
+            state.enabledKinds.insert(kind)
+        } else {
+            state.enabledKinds.remove(kind)
+        }
+        rebuildQueue(resetStatuses: state.phase != .printing)
+        persistSettings()
+    }
+
+    /// Saves the current printer and options as a named preset.
+    func savePreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let preset = PrintPreset(
+            name: trimmed,
+            printerName: state.printerName,
+            settings: state.printSettings
+        )
+        if let index = state.presets.firstIndex(where: { $0.name == trimmed }) {
+            var updated = preset
+            updated.id = state.presets[index].id
+            state.presets[index] = updated
+            state.selectedPresetID = updated.id
+        } else {
+            state.presets.append(preset)
+            state.selectedPresetID = preset.id
+        }
+        persistSettings()
+    }
+
+    /// Applies a saved preset.
+    func applyPreset(id: UUID) {
+        guard let preset = state.presets.first(where: { $0.id == id }) else { return }
+        state.selectedPresetID = id
+        state.printSettings = preset.settings
+        if let printerName = preset.printerName,
+           state.availablePrinters.contains(where: { $0.name == printerName }) {
+            state.printerName = printerName
+        }
+        persistSettings()
+    }
+
+    /// Deletes a saved preset.
+    func deletePreset(id: UUID) {
+        state.presets.removeAll { $0.id == id }
+        if state.selectedPresetID == id {
+            state.selectedPresetID = nil
+        }
+        persistSettings()
+    }
+
+    /// Starts printing the visible (filtered) queue.
     func startPrinting() {
         guard state.canStartPrint else { return }
         guard let printerName = state.printerName else { return }
-        let printer = PrinterInfo(name: printerName)
-        runPrint(files: state.files, printer: printer)
+        guard state.isPageRangeValid else {
+            state.errorMessage = String(localized: "error.invalidPageRange")
+            return
+        }
+        runPrint(files: state.jobs.map(\.file), printer: PrinterInfo(name: printerName))
     }
 
     /// Retries only the files that failed in the last batch.
@@ -132,12 +239,15 @@ final class BatchPrintViewModel: ObservableObject {
         guard state.phase == .finished else { return }
         let failed = state.failedFiles
         guard !failed.isEmpty else { return }
-        guard let printerName = state.printerName ?? printService.defaultPrinter()?.name else {
-            state.errorMessage = String(localized: "error.noPrinter")
-            return
-        }
-        refreshPrinter()
-        runPrint(files: failed, printer: PrinterInfo(name: printerName))
+        retry(files: failed)
+    }
+
+    /// Retries a single failed queue item.
+    func retryJob(id: UUID) {
+        guard state.phase != .printing else { return }
+        guard let job = state.jobs.first(where: { $0.id == id }) else { return }
+        guard case .failed = job.status else { return }
+        retry(files: [job.file])
     }
 
     /// Cancels an in-flight print batch.
@@ -196,16 +306,81 @@ final class BatchPrintViewModel: ObservableObject {
         state.isDropEnabled = state.phase != .printing && state.phase != .scanning
     }
 
-    /// Presents an open-panel to pick a folder.
+    /// Presents an open-panel to pick files or folders.
     func pickFolder() {
         guard state.isDropEnabled else { return }
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.prompt = String(localized: "button.selectFolder")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        handleFolderDrop(url)
+        guard panel.runModal() == .OK else { return }
+        handleDroppedURLs(panel.urls)
+    }
+
+    /// Enables or disables copying successful prints to the archive folder.
+    func setArchiveEnabled(_ enabled: Bool) {
+        state.archiveEnabled = enabled
+        persistSettings()
+    }
+
+    /// Sets the archive destination path (used by the folder picker and tests).
+    func setArchiveFolderPath(_ path: String) {
+        state.archiveFolderPath = path
+        persistSettings()
+    }
+
+    /// Lets the user choose the archive destination folder.
+    func pickArchiveFolder() {
+        guard let url = pickDirectory(promptKey: "button.chooseArchiveFolder") else { return }
+        setArchiveFolderPath(url.path)
+    }
+
+    /// Enables or disables hot-folder watching.
+    func setHotFolderEnabled(_ enabled: Bool) {
+        state.hotFolderEnabled = enabled
+        persistSettings()
+        if enabled {
+            restoreHotFolderWatchIfNeeded()
+        } else {
+            folderWatcher.stop()
+        }
+    }
+
+    /// Enables or disables auto-print for newly arrived hot-folder files.
+    func setHotFolderAutoPrint(_ enabled: Bool) {
+        state.hotFolderAutoPrint = enabled
+        persistSettings()
+    }
+
+    /// Lets the user choose the watched hot folder.
+    func pickHotFolder() {
+        guard let url = pickDirectory(promptKey: "button.chooseHotFolder") else { return }
+        state.hotFolderPath = url.path
+        persistSettings()
+        hotFolderKnownPaths.removeAll()
+        if state.hotFolderEnabled {
+            restoreHotFolderWatchIfNeeded()
+        }
+    }
+
+    /// Removes all stored history rows.
+    func clearHistory() {
+        state.history = []
+        persistSettings()
+    }
+
+    private func retry(files: [PrintableFile]) {
+        guard state.isPageRangeValid else {
+            state.errorMessage = String(localized: "error.invalidPageRange")
+            return
+        }
+        guard let printerName = state.printerName ?? printService.defaultPrinter()?.name else {
+            state.errorMessage = String(localized: "error.noPrinter")
+            return
+        }
+        refreshPrinter()
+        runPrint(files: files, printer: PrinterInfo(name: printerName))
     }
 
     private func applyInstallProgress(_ progress: LibreOfficeInstallProgress) {
@@ -228,9 +403,11 @@ final class BatchPrintViewModel: ObservableObject {
 
         state.phase = .printing
         state.isDropEnabled = false
+        state.jobs = files.map { PrintJob(file: $0) }
         state.progress = BatchPrintProgress(
             currentIndex: 0,
             totalCount: files.count,
+            currentFileID: nil,
             currentFileName: "",
             phase: .pending,
             succeededCount: 0,
@@ -242,9 +419,13 @@ final class BatchPrintViewModel: ObservableObject {
         printTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await printBatch.execute(files, printer: printer) { progress in
+                let result = try await printBatch.execute(
+                    files,
+                    printer: printer,
+                    settings: state.printSettings
+                ) { progress in
                     Task { @MainActor [weak self] in
-                        self?.state.progress = progress
+                        self?.applyProgress(progress)
                     }
                 }
                 try Task.checkCancellation()
@@ -252,6 +433,8 @@ final class BatchPrintViewModel: ObservableObject {
                 state.phase = .finished
                 state.isDropEnabled = true
                 refreshOfficeAvailability()
+                appendHistory(result, printerName: printer.name)
+                archiveSucceeded(result.succeeded)
                 if !result.failed.isEmpty {
                     state.errorMessage = String(
                         localized: "message.failedCount \(result.failed.count)"
@@ -267,5 +450,166 @@ final class BatchPrintViewModel: ObservableObject {
                 state.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func applyProgress(_ progress: BatchPrintProgress) {
+        state.progress = progress
+        guard let fileID = progress.currentFileID,
+              let index = state.jobs.firstIndex(where: { $0.file.id == fileID })
+        else { return }
+        state.jobs[index].status = progress.phase
+    }
+
+    private func applyScannedFiles(_ files: [PrintableFile]) {
+        state.files = files
+        rebuildQueue(resetStatuses: true)
+        state.phase = .ready
+    }
+
+    private func rebuildQueue(resetStatuses: Bool) {
+        let visible = sorter.sorted(
+            state.files.filter { state.enabledKinds.contains($0.kind) },
+            order: state.sortOrder
+        )
+        if resetStatuses {
+            state.jobs = visible.map { PrintJob(file: $0) }
+            return
+        }
+        let statusByID = Dictionary(uniqueKeysWithValues: state.jobs.map { ($0.file.id, $0.status) })
+        state.jobs = visible.map { file in
+            PrintJob(file: file, status: statusByID[file.id] ?? .pending)
+        }
+    }
+
+    private func appendHistory(_ result: BatchPrintResult, printerName: String) {
+        let succeeded = result.succeeded.map {
+            PrintHistoryRecord(
+                fileName: $0.displayName,
+                kind: $0.kind,
+                printerName: printerName,
+                succeeded: true
+            )
+        }
+        let failed = result.failed.map {
+            PrintHistoryRecord(
+                fileName: $0.file.displayName,
+                kind: $0.file.kind,
+                printerName: printerName,
+                succeeded: false,
+                message: $0.message
+            )
+        }
+        state.history = (failed + succeeded + state.history)
+        persistSettings()
+    }
+
+    private func archiveSucceeded(_ files: [PrintableFile]) {
+        guard state.archiveEnabled, let path = state.archiveFolderPath, !files.isEmpty else { return }
+        do {
+            try archiver.archive(files, to: URL(fileURLWithPath: path))
+        } catch {
+            state.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func applySettings(_ settings: AppSettings) {
+        state.presets = settings.presets
+        state.history = settings.history
+        state.sortOrder = settings.sortOrder
+        state.enabledKinds = settings.enabledKindSet
+        state.archiveEnabled = settings.archiveEnabled
+        state.archiveFolderPath = settings.archiveFolderPath
+        state.hotFolderEnabled = settings.hotFolderEnabled
+        state.hotFolderPath = settings.hotFolderPath
+        state.hotFolderAutoPrint = settings.hotFolderAutoPrint
+    }
+
+    private func persistSettings() {
+        settingsStore.save(
+            AppSettings(
+                presets: state.presets,
+                history: state.history,
+                sortOrder: state.sortOrder,
+                enabledKinds: FileKind.allCases.filter { state.enabledKinds.contains($0) },
+                archiveEnabled: state.archiveEnabled,
+                archiveFolderPath: state.archiveFolderPath,
+                hotFolderEnabled: state.hotFolderEnabled,
+                hotFolderPath: state.hotFolderPath,
+                hotFolderAutoPrint: state.hotFolderAutoPrint
+            )
+        )
+    }
+
+    private func restoreHotFolderWatchIfNeeded() {
+        folderWatcher.stop()
+        guard state.hotFolderEnabled, let path = state.hotFolderPath else { return }
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else { return }
+
+        ingestHotFolder(url, printNewFiles: false)
+        folderWatcher.start(url: url) { [weak self] in
+            self?.ingestHotFolder(url, printNewFiles: true)
+        }
+    }
+
+    private func ingestHotFolder(_ url: URL, printNewFiles: Bool) {
+        scanTask?.cancel()
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            guard state.phase != .printing else { return }
+            do {
+                let files = try await scanFolder.execute(url)
+                try Task.checkCancellation()
+                let newFiles = files.filter { !hotFolderKnownPaths.contains($0.url.path) }
+                hotFolderKnownPaths.formUnion(files.map(\.url.path))
+                mergeFiles(files)
+                state.folderName = url.lastPathComponent
+                if printNewFiles, state.hotFolderAutoPrint, !newFiles.isEmpty, state.canAutoPrintHotFolder {
+                    let printable = sorter.sorted(
+                        newFiles.filter { state.enabledKinds.contains($0.kind) },
+                        order: state.sortOrder
+                    )
+                    if !printable.isEmpty, let printerName = state.printerName {
+                        runPrint(files: printable, printer: PrinterInfo(name: printerName))
+                    }
+                }
+            } catch {
+                if state.phase != .printing {
+                    state.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func mergeFiles(_ incoming: [PrintableFile]) {
+        var byPath = Dictionary(uniqueKeysWithValues: state.files.map { ($0.url.path, $0) })
+        for file in incoming where byPath[file.url.path] == nil {
+            byPath[file.url.path] = file
+        }
+        state.files = Array(byPath.values)
+        rebuildQueue(resetStatuses: state.phase != .finished)
+        if state.phase == .idle || state.phase == .scanning {
+            state.phase = state.jobs.isEmpty ? .idle : .ready
+        }
+    }
+
+    private func pickDirectory(promptKey: String.LocalizationValue) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = String(localized: promptKey)
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    private static func displayName(for urls: [URL]) -> String {
+        if urls.count == 1 {
+            return urls[0].lastPathComponent
+        }
+        return String(localized: "summary.itemCount \(urls.count)")
     }
 }

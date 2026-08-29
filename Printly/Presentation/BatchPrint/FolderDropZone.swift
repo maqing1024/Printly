@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Drop target (and click target) for selecting a folder to scan.
+/// Drop target (and click target) for selecting files or a folder to scan.
 struct FolderDropZone: View {
     let isEnabled: Bool
-    let onFolderDropped: (URL) -> Void
+    let onURLsDropped: ([URL]) -> Void
     let onClick: () -> Void
 
     @State private var isTargeted = false
@@ -47,28 +47,35 @@ struct FolderDropZone: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
+        guard !providers.isEmpty else { return false }
 
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            let url: URL?
-            if let value = item as? URL {
-                url = value
-            } else if let data = item as? Data {
-                url = URL(dataRepresentation: data, relativeTo: nil)
-            } else {
-                url = nil
+        Task {
+            var urls: [URL] = []
+            for provider in providers {
+                if let url = await Self.loadFileURL(from: provider) {
+                    urls.append(url)
+                }
             }
-
-            guard let url else { return }
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-                  isDirectory.boolValue
-            else { return }
-
-            Task { @MainActor in
-                onFolderDropped(url)
+            let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+            guard !existing.isEmpty else { return }
+            await MainActor.run {
+                onURLsDropped(existing)
             }
         }
         return true
+    }
+
+    private static func loadFileURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                if let value = item as? URL {
+                    continuation.resume(returning: value)
+                } else if let data = item as? Data {
+                    continuation.resume(returning: URL(dataRepresentation: data, relativeTo: nil))
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
     }
 }

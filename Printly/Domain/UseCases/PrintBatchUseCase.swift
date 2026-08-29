@@ -43,11 +43,13 @@ nonisolated struct PrintBatchUseCase: Sendable {
     /// - Parameters:
     ///   - files: Ordered files to print.
     ///   - printer: Target printer.
+    ///   - settings: Batch-wide copies, duplex, color, and page range.
     ///   - onProgress: Progress callback (may be invoked off the main actor).
     /// - Returns: Success and failure lists.
     func execute(
         _ files: [PrintableFile],
         printer: PrinterInfo,
+        settings: PrintSettings = .default,
         onProgress: @Sendable (BatchPrintProgress) -> Void
     ) async throws -> BatchPrintResult {
         var succeeded: [PrintableFile] = []
@@ -60,6 +62,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
             let outcome = try await printFile(
                 file,
                 printer: printer,
+                settings: settings,
                 index: index,
                 total: total,
                 succeededCount: succeeded.count,
@@ -78,6 +81,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
                 BatchPrintProgress(
                     currentIndex: index + 1,
                     totalCount: total,
+                    currentFileID: file.id,
                     currentFileName: file.displayName,
                     phase: outcome.isSuccess ? .succeeded : .failed(outcome.failureMessage ?? ""),
                     succeededCount: succeeded.count,
@@ -107,6 +111,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
     private func printFile(
         _ file: PrintableFile,
         printer: PrinterInfo,
+        settings: PrintSettings,
         index: Int,
         total: Int,
         succeededCount: Int,
@@ -123,6 +128,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
                     BatchPrintProgress(
                         currentIndex: index + 1,
                         totalCount: total,
+                        currentFileID: file.id,
                         currentFileName: file.displayName,
                         phase: .converting,
                         succeededCount: succeededCount,
@@ -144,6 +150,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
                     BatchPrintProgress(
                         currentIndex: index + 1,
                         totalCount: total,
+                        currentFileID: file.id,
                         currentFileName: file.displayName,
                         phase: .printing,
                         succeededCount: succeededCount,
@@ -151,7 +158,7 @@ nonisolated struct PrintBatchUseCase: Sendable {
                     )
                 )
 
-                try await printService.printPDF(at: pdfURL, using: printer)
+                try await printService.printPDF(at: pdfURL, using: printer, settings: settings)
                 return .success
             } catch is CancellationError {
                 throw CancellationError()

@@ -26,10 +26,35 @@ struct FileSorterTests {
         #expect(sorted == ["a/dup.pdf", "z/dup.pdf"])
     }
 
-    private func makeFile(name: String, relativePath: String? = nil) -> PrintableFile {
+    @Test func sorted_byKindThenName() {
+        let files = [
+            makeFile(name: "z.pdf", kind: .pdf),
+            makeFile(name: "a.docx", kind: .word),
+            makeFile(name: "b.png", kind: .image),
+        ]
+
+        let sorted = FileSorter().sorted(files, order: .kind).map(\.displayName)
+        #expect(sorted == ["b.png", "z.pdf", "a.docx"])
+    }
+
+    @Test func sorted_byPath() {
+        let files = [
+            makeFile(name: "b.pdf", relativePath: "z/b.pdf"),
+            makeFile(name: "a.pdf", relativePath: "a/a.pdf"),
+        ]
+
+        let sorted = FileSorter().sorted(files, order: .path).map(\.relativePath)
+        #expect(sorted == ["a/a.pdf", "z/b.pdf"])
+    }
+
+    private func makeFile(
+        name: String,
+        kind: FileKind = .pdf,
+        relativePath: String? = nil
+    ) -> PrintableFile {
         PrintableFile(
             url: URL(fileURLWithPath: "/tmp/\(relativePath ?? name)"),
-            kind: .pdf,
+            kind: kind,
             displayName: name,
             relativePath: relativePath ?? name
         )

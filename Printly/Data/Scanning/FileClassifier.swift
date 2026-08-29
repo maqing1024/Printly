@@ -7,6 +7,8 @@ nonisolated struct FileClassifier: Sendable {
         "jpg": .image,
         "jpeg": .image,
         "png": .image,
+        "tif": .image,
+        "tiff": .image,
         "heic": .image,
         "docx": .word,
         "xlsx": .excel,

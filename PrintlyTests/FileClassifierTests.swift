@@ -10,6 +10,8 @@ struct FileClassifierTests {
         ("photo.JPG", FileKind.image),
         ("photo.jpeg", FileKind.image),
         ("shot.png", FileKind.image),
+        ("scan.tif", FileKind.image),
+        ("scan.TIFF", FileKind.image),
         ("raw.HEIC", FileKind.image),
         ("doc.docx", FileKind.word),
         ("sheet.xlsx", FileKind.excel),
